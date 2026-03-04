@@ -2,6 +2,30 @@ const $ = (id) => document.getElementById(id);
 const MSG = window.APC.MSG;
 const UNKNOWN_SESSION_ID = "无";
 const CONTENT_SCRIPT_FILES = ["utils/common.js", "content/content.js"];
+const DEFAULT_SETTINGS = {
+  mode: "scrollOnly",
+  delayMs: 800,
+  maxShots: 120,
+  maxPages: 5,
+  exportText: true,
+  exportPdf: true,
+  pdfSinglePage: true,
+  ocrEnabled: false,
+  ocrLanguage: "chs",
+  ocrApiKey: ""
+};
+const SETTINGS_FIELD_IDS = [
+  "mode",
+  "delay",
+  "maxShots",
+  "maxPages",
+  "exportText",
+  "exportPdf",
+  "pdfSinglePage",
+  "ocrEnabled",
+  "ocrLanguage",
+  "ocrApiKey"
+];
 
 const viewState = {
   sessionId: UNKNOWN_SESSION_ID,
@@ -75,11 +99,15 @@ async function ensureContentScriptReady(tabId) {
 }
 
 function renderStatus() {
-  const errorBlock = viewState.error || "-";
-  $("status").textContent =
-    `会话ID: ${normalizeSessionId(viewState.sessionId)}\n` +
-    `状态: ${viewState.status || "-"}\n\n` +
-    `错误:\n${errorBlock}`;
+  const sessionId = normalizeSessionId(viewState.sessionId);
+  const statusText = viewState.status || "-";
+  const errorText = viewState.error || "-";
+  const hasError = Boolean(viewState.error);
+
+  $("statusSessionId").textContent = sessionId;
+  $("statusText").textContent = statusText;
+  $("statusError").textContent = errorText;
+  $("statusPanel").classList.toggle("has-error", hasError);
 }
 
 function patchViewState(patch) {
@@ -95,18 +123,109 @@ function patchViewState(patch) {
   renderStatus();
 }
 
+function clampNumber(v, fallback, min) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, n);
+}
+
+function updateOcrFieldsEnabled() {
+  const enabled = $("ocrEnabled").checked;
+  $("ocrLanguage").disabled = !enabled;
+  $("ocrApiKey").disabled = !enabled;
+}
+
+function updatePdfFieldsEnabled() {
+  const enabled = $("exportPdf").checked;
+  $("pdfSinglePage").disabled = !enabled;
+}
+
+function readFormSettings() {
+  return {
+    mode: $("mode").value || DEFAULT_SETTINGS.mode,
+    delayMs: clampNumber($("delay").value, DEFAULT_SETTINGS.delayMs, 100),
+    maxShots: clampNumber($("maxShots").value, DEFAULT_SETTINGS.maxShots, 1),
+    maxPages: clampNumber($("maxPages").value, DEFAULT_SETTINGS.maxPages, 1),
+    exportText: $("exportText").checked,
+    exportPdf: $("exportPdf").checked,
+    pdfSinglePage: $("pdfSinglePage").checked,
+    ocrEnabled: $("ocrEnabled").checked,
+    ocrLanguage: $("ocrLanguage").value || DEFAULT_SETTINGS.ocrLanguage,
+    ocrApiKey: String($("ocrApiKey").value || "").trim()
+  };
+}
+
+function applyFormSettings(settings = {}) {
+  const merged = {
+    ...DEFAULT_SETTINGS,
+    ...(settings || {})
+  };
+
+  $("mode").value = merged.mode;
+  $("delay").value = clampNumber(merged.delayMs, DEFAULT_SETTINGS.delayMs, 100);
+  $("maxShots").value = clampNumber(merged.maxShots, DEFAULT_SETTINGS.maxShots, 1);
+  $("maxPages").value = clampNumber(merged.maxPages, DEFAULT_SETTINGS.maxPages, 1);
+  $("exportText").checked = !!merged.exportText;
+  $("exportPdf").checked = merged.exportPdf !== false;
+  $("pdfSinglePage").checked = merged.pdfSinglePage !== false;
+  $("ocrEnabled").checked = !!merged.ocrEnabled;
+  $("ocrLanguage").value = merged.ocrLanguage || DEFAULT_SETTINGS.ocrLanguage;
+  $("ocrApiKey").value = String(merged.ocrApiKey || "");
+  updatePdfFieldsEnabled();
+  updateOcrFieldsEnabled();
+}
+
+async function loadSettings() {
+  try {
+    const saved = await chrome.storage.local.get(DEFAULT_SETTINGS);
+    applyFormSettings(saved);
+  } catch (_e) {
+    applyFormSettings(DEFAULT_SETTINGS);
+  }
+}
+
+async function saveSettings(settings) {
+  await chrome.storage.local.set(settings);
+}
+
+function persistCurrentSettings() {
+  const settings = readFormSettings();
+  saveSettings(settings).catch(() => {});
+}
+
+function bindSettingsEvents() {
+  SETTINGS_FIELD_IDS.forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    const eventName = id === "ocrApiKey" ? "input" : "change";
+    el.addEventListener(eventName, () => {
+      if (id === "exportPdf") updatePdfFieldsEnabled();
+      if (id === "ocrEnabled") updateOcrFieldsEnabled();
+      persistCurrentSettings();
+    });
+  });
+}
+
 $("start").addEventListener("click", async () => {
   const tab = await getActiveTab();
   if (!tab?.id) return;
 
   const sessionId = window.APC.nowSessionId();
+  const settings = readFormSettings();
+  applyFormSettings(settings);
+  saveSettings(settings).catch(() => {});
 
   const payload = {
-    mode: $("mode").value,
-    delayMs: Number($("delay").value || 800),
-    maxShots: Number($("maxShots").value || 120),
-    maxPages: Number($("maxPages").value || 5),
-    exportText: $("exportText").checked
+    mode: settings.mode,
+    delayMs: settings.delayMs,
+    maxShots: settings.maxShots,
+    maxPages: settings.maxPages,
+    exportText: settings.exportText,
+    exportPdf: settings.exportPdf,
+    pdfSinglePage: settings.pdfSinglePage,
+    ocrEnabled: settings.ocrEnabled,
+    ocrLanguage: settings.ocrLanguage,
+    ocrApiKey: settings.ocrApiKey
   };
 
   patchViewState({ sessionId, status: "正在启动...", error: "" });
@@ -163,4 +282,10 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-renderStatus();
+async function init() {
+  renderStatus();
+  bindSettingsEvents();
+  await loadSettings();
+}
+
+init();
