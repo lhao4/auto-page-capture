@@ -1,0 +1,8 @@
+body { font-family: Arial, sans-serif; width: 320px; margin: 10px; }
+h3 { margin: 0 0 10px 0; }
+.box { display: grid; gap: 8px; }
+.row { display: flex; gap: 8px; }
+button { flex: 1; padding: 8px; cursor: pointer; }
+.status { margin-top: 10px; font-size: 12px; white-space: pre-wrap; }
+.chk { display: flex; align-items: center; gap: 6px; }
+select, input { width: 100%; }

@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <h3>自动页面截图</h3>
+
+  <div class="box">
+    <label>
+      模式：
+      <select id="mode">
+        <option value="scrollOnly">仅滚动</option>
+        <option value="nextPage">滚动 + 自动翻页</option>
+      </select>
+    </label>
+
+    <label>
+      延迟(ms)：
+      <input id="delay" type="number" value="800" min="100" step="100" />
+    </label>
+
+    <label>
+      最大截图数：
+      <input id="maxShots" type="number" value="120" min="1" step="10" />
+    </label>
+
+    <label>
+      最大页数：
+      <input id="maxPages" type="number" value="5" min="1" step="1" />
+    </label>
+
+    <label class="chk">
+      <input id="exportText" type="checkbox" checked />
+      导出页面文本（page.md）
+    </label>
+
+    <div class="row">
+      <button id="start">开始</button>
+      <button id="stop">停止</button>
+    </div>
+  </div>
+
+  <div id="status" class="status">空闲</div>
+
+  <script src="../utils/common.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

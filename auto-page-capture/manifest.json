@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "自动页面截图",
+  "version": "1.0.0",
+  "description": "自动滚动与翻页截图，并导出页面文本。",
+  "permissions": ["activeTab", "scripting", "downloads", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background/service_worker.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Auto Capture"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["utils/common.js", "content/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
