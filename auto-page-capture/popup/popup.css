@@ -204,6 +204,34 @@ input:focus {
   color: var(--danger);
 }
 
+.diag-box {
+  margin-top: 9px;
+  border: 1px solid #d6d0c0;
+  border-radius: 9px;
+  background: #f4f1ea;
+  padding: 7px 8px;
+}
+
+.diag-box.diag-ready {
+  border-color: #c7c0ae;
+  background: #f0ece3;
+}
+
+.diag-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+
+.diag-attempts {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  font-size: 11px;
+  max-height: 90px;
+  overflow: auto;
+  color: #5f584e;
+}
+
 @keyframes fadeInUp {
   from {
     opacity: 0;

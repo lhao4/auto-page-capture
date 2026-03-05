@@ -11,6 +11,7 @@ const DEFAULT_SETTINGS = {
   exportPdf: true,
   pdfSinglePage: true,
   ocrEnabled: false,
+  ocrMode: "balanced",
   ocrLanguage: "chs",
   ocrApiKey: ""
 };
@@ -23,6 +24,7 @@ const SETTINGS_FIELD_IDS = [
   "exportPdf",
   "pdfSinglePage",
   "ocrEnabled",
+  "ocrMode",
   "ocrLanguage",
   "ocrApiKey"
 ];
@@ -30,7 +32,8 @@ const SETTINGS_FIELD_IDS = [
 const viewState = {
   sessionId: UNKNOWN_SESSION_ID,
   status: "空闲",
-  error: ""
+  error: "",
+  ocrDiag: null
 };
 
 async function getActiveTab() {
@@ -103,10 +106,19 @@ function renderStatus() {
   const statusText = viewState.status || "-";
   const errorText = viewState.error || "-";
   const hasError = Boolean(viewState.error);
+  const diag = viewState.ocrDiag;
+  const hasDiag = !!diag;
 
   $("statusSessionId").textContent = sessionId;
   $("statusText").textContent = statusText;
   $("statusError").textContent = errorText;
+  $("ocrDiagMode").textContent = hasDiag ? (diag.mode || "-") : "-";
+  $("ocrDiagSummary").textContent = hasDiag ? (diag.summary || "-") : "-";
+  $("ocrDiagVariant").textContent = hasDiag ? (diag.bestVariant || "-") : "-";
+  $("ocrDiagScore").textContent = hasDiag ? String(diag.bestScore ?? "-") : "-";
+  $("ocrDiagAttemptsMeta").textContent = hasDiag ? (diag.attemptsMeta || "-") : "-";
+  $("ocrDiagAttempts").textContent = hasDiag ? (diag.attemptsText || "-") : "-";
+  $("ocrDiagPanel").classList.toggle("diag-ready", hasDiag);
   $("statusPanel").classList.toggle("has-error", hasError);
 }
 
@@ -120,7 +132,33 @@ function patchViewState(patch) {
   if (Object.prototype.hasOwnProperty.call(patch, "error")) {
     viewState.error = patch.error || "";
   }
+  if (Object.prototype.hasOwnProperty.call(patch, "ocrDiag")) {
+    viewState.ocrDiag = patch.ocrDiag || null;
+  }
   renderStatus();
+}
+
+function formatOcrDiag(diag) {
+  const attempts = Array.isArray(diag?.attempts) ? diag.attempts : [];
+  const lines = attempts.slice(0, 12).map((item, idx) => {
+    const ok = item?.ok ? "OK" : "FAIL";
+    const variant = String(item?.variant || "unknown");
+    const score = Number(item?.score || 0);
+    const len = Number(item?.length || 0);
+    const err = String(item?.error || "");
+    return err
+      ? `${idx + 1}. [${ok}] ${variant} score=${score} len=${len} err=${err}`
+      : `${idx + 1}. [${ok}] ${variant} score=${score} len=${len}`;
+  });
+
+  return {
+    mode: String(diag?.mode || "-"),
+    summary: String(diag?.summary || "-"),
+    bestVariant: String(diag?.bestVariant || "-"),
+    bestScore: Number.isFinite(Number(diag?.bestScore)) ? Number(diag.bestScore) : "-",
+    attemptsMeta: `${attempts.length} 次`,
+    attemptsText: lines.length > 0 ? lines.join("\n") : "-"
+  };
 }
 
 function clampNumber(v, fallback, min) {
@@ -131,6 +169,7 @@ function clampNumber(v, fallback, min) {
 
 function updateOcrFieldsEnabled() {
   const enabled = $("ocrEnabled").checked;
+  $("ocrMode").disabled = !enabled;
   $("ocrLanguage").disabled = !enabled;
   $("ocrApiKey").disabled = !enabled;
 }
@@ -150,6 +189,7 @@ function readFormSettings() {
     exportPdf: $("exportPdf").checked,
     pdfSinglePage: $("pdfSinglePage").checked,
     ocrEnabled: $("ocrEnabled").checked,
+    ocrMode: $("ocrMode").value || DEFAULT_SETTINGS.ocrMode,
     ocrLanguage: $("ocrLanguage").value || DEFAULT_SETTINGS.ocrLanguage,
     ocrApiKey: String($("ocrApiKey").value || "").trim()
   };
@@ -169,6 +209,7 @@ function applyFormSettings(settings = {}) {
   $("exportPdf").checked = merged.exportPdf !== false;
   $("pdfSinglePage").checked = merged.pdfSinglePage !== false;
   $("ocrEnabled").checked = !!merged.ocrEnabled;
+  $("ocrMode").value = merged.ocrMode || DEFAULT_SETTINGS.ocrMode;
   $("ocrLanguage").value = merged.ocrLanguage || DEFAULT_SETTINGS.ocrLanguage;
   $("ocrApiKey").value = String(merged.ocrApiKey || "");
   updatePdfFieldsEnabled();
@@ -224,11 +265,13 @@ $("start").addEventListener("click", async () => {
     exportPdf: settings.exportPdf,
     pdfSinglePage: settings.pdfSinglePage,
     ocrEnabled: settings.ocrEnabled,
+    ocrMode: settings.ocrMode,
     ocrLanguage: settings.ocrLanguage,
     ocrApiKey: settings.ocrApiKey
   };
 
   patchViewState({ sessionId, status: "正在启动...", error: "" });
+  patchViewState({ ocrDiag: null });
   try {
     await ensureContentScriptReady(tab.id);
     await sendTabMessage(tab.id, {
@@ -269,9 +312,14 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (!msg?.type) return;
 
   if (msg.type === MSG.STATUS) {
+    let ocrDiagPatch;
+    if (msg.payload?.ocrDiag) {
+      ocrDiagPatch = formatOcrDiag(msg.payload.ocrDiag);
+    }
     patchViewState({
       sessionId: msg.sessionId,
-      status: msg.payload?.text || "-"
+      status: msg.payload?.text || "-",
+      ...(ocrDiagPatch ? { ocrDiag: ocrDiagPatch } : {})
     });
   }
   if (msg.type === MSG.ERROR) {

@@ -15,14 +15,15 @@ const MSG = {
   SESSION_FINISH: "SESSION_FINISH"
 };
 const OCR_PROVIDER = "ocrspace";
-const OCR_MAX_DIM = 3600;
-const PDF_MAX_WIDTH_PX = 2200;
-const PDF_JPEG_QUALITY = 0.94;
+const DEFAULT_OCR_MODE = "balanced";
+const OCR_MAX_DIM = 4200;
+const PDF_MAX_WIDTH_PX = 2600;
+const PDF_JPEG_QUALITY = 0.97;
 const PDF_PX_TO_PT = 0.75;
 const PDF_SINGLE_PAGE_MAX_HEIGHT_PX = 28000;
 const PDF_SINGLE_PAGE_MAX_AREA = 95_000_000;
 const PDF_LOSSLESS_PREFERRED = true;
-const PDF_LOSSLESS_MAX_AREA = 22_000_000;
+const PDF_LOSSLESS_MAX_AREA = 36_000_000;
 
 function safeName(s) {
   return String(s || "").replace(/[:/\\?*"<>|]/g, "_").slice(0, 120);
@@ -485,6 +486,12 @@ function normalizeSessionId(sessionId) {
   return sessionId ? String(sessionId) : UNKNOWN_SESSION_ID;
 }
 
+function normalizeOcrMode(value) {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "fast" || v === "accurate") return v;
+  return DEFAULT_OCR_MODE;
+}
+
 function makeMessage(type, sessionId, payload = {}) {
   return {
     type,
@@ -497,8 +504,11 @@ function sendMessage(type, sessionId, payload = {}) {
   chrome.runtime.sendMessage(makeMessage(type, sessionId, payload));
 }
 
-function sendStatus(sessionId, text) {
-  sendMessage(MSG.STATUS, sessionId, { text });
+function sendStatus(sessionId, text, extraPayload = {}) {
+  sendMessage(MSG.STATUS, sessionId, {
+    text,
+    ...(extraPayload || {})
+  });
 }
 
 function sendError(sessionId, message) {
@@ -523,6 +533,7 @@ function createSessionMeta(sessionId, baseDir, host, tabUrl, payload = {}) {
     exportPdf: payload.exportPdf !== false,
     pdfSinglePage: payload.pdfSinglePage !== false,
     ocrEnabled: !!payload.ocrEnabled,
+    ocrMode: normalizeOcrMode(payload.ocrMode),
     ocrLanguage: String(payload.ocrLanguage || "chs"),
     pdf: null,
     _pdfFrames: [],
@@ -627,6 +638,7 @@ function applyImageFilter(pixelData, opts = {}) {
   const brightness = Number(opts.brightness || 0);
   const threshold = typeof opts.threshold === "number" ? Number(opts.threshold) : null;
   const grayscale = !!opts.grayscale;
+  const invert = !!opts.invert;
 
   const data = pixelData.data;
   for (let i = 0; i < data.length; i += 4) {
@@ -653,10 +665,42 @@ function applyImageFilter(pixelData, opts = {}) {
       b = v;
     }
 
+    if (invert) {
+      r = 255 - r;
+      g = 255 - g;
+      b = 255 - b;
+    }
+
     data[i] = clampColor(r);
     data[i + 1] = clampColor(g);
     data[i + 2] = clampColor(b);
   }
+}
+
+async function estimateImageLuminance(bitmap) {
+  if (typeof OffscreenCanvas === "undefined") {
+    return 255;
+  }
+  const sampleW = 72;
+  const scale = sampleW / Math.max(1, bitmap.width);
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return 255;
+
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+    sum += lum;
+    count += 1;
+  }
+  if (count < 1) return 255;
+  return sum / count;
 }
 
 async function renderOcrVariantDataUrl(bitmap, opts = {}) {
@@ -688,24 +732,51 @@ async function buildOcrInputs(dataUrl) {
   let bitmap = null;
   try {
     bitmap = await dataUrlToImageBitmap(dataUrl);
+    const luminance = await estimateImageLuminance(bitmap);
+    const isDarkBackground = luminance < 112;
+
     const colorUpscale = await renderOcrVariantDataUrl(bitmap, {
-      scale: 1.65,
+      scale: 1.72,
       grayscale: false,
-      contrast: 1.08,
-      brightness: 2
+      contrast: 1.12,
+      brightness: 3
     });
     if (colorUpscale) {
       inputs.push({ name: "color_upscale", engine: 2, dataUrl: colorUpscale });
     }
 
     const grayContrast = await renderOcrVariantDataUrl(bitmap, {
-      scale: 1.75,
+      scale: 1.82,
       grayscale: true,
-      contrast: 1.35,
-      brightness: 6
+      contrast: 1.42,
+      brightness: 8
     });
     if (grayContrast) {
       inputs.push({ name: "gray_contrast", engine: 2, dataUrl: grayContrast });
+    }
+
+    const grayBinary = await renderOcrVariantDataUrl(bitmap, {
+      scale: 1.9,
+      grayscale: true,
+      contrast: 1.55,
+      brightness: 12,
+      threshold: 148
+    });
+    if (grayBinary) {
+      inputs.push({ name: "gray_binary", engine: 2, dataUrl: grayBinary });
+    }
+
+    if (isDarkBackground) {
+      const darkInvert = await renderOcrVariantDataUrl(bitmap, {
+        scale: 1.78,
+        grayscale: true,
+        contrast: 1.28,
+        brightness: 4,
+        invert: true
+      });
+      if (darkInvert) {
+        inputs.push({ name: "dark_invert", engine: 2, dataUrl: darkInvert });
+      }
     }
   } catch (_e) {
     return inputs;
@@ -801,10 +872,43 @@ function summarizeOcrAttempts(items) {
   }));
 }
 
+function buildOcrDiagnosticPayload(ocr) {
+  const attempts = Array.isArray(ocr?.attempts) ? ocr.attempts : [];
+  const ok = !!ocr?.ok;
+  const summary = ok
+    ? `识别成功（文本长度=${String(ocr?.text || "").length}）`
+    : `识别失败（${String(ocr?.error || "unknown")}）`;
+
+  return {
+    mode: String(ocr?.mode || DEFAULT_OCR_MODE),
+    summary,
+    bestVariant: String(ocr?.variant || "-"),
+    bestScore: Number(ocr?.score || 0),
+    attempts
+  };
+}
+
+function pickOcrInputsByMode(inputs, mode) {
+  const list = Array.isArray(inputs) ? inputs.filter(Boolean) : [];
+  if (!list.length) return [];
+  if (mode === "fast") {
+    return list.slice(0, 2);
+  }
+  if (mode === "accurate") {
+    return list;
+  }
+  return list.slice(0, 4);
+}
+
 async function runOcrPipeline(dataUrl, options = {}) {
-  const inputs = await buildOcrInputs(dataUrl);
-  const totalTimeout = Math.max(10000, Number(options.timeoutMs || 18000));
-  const perAttemptTimeout = Math.max(4200, Math.floor(totalTimeout / Math.max(1, inputs.length)));
+  const mode = normalizeOcrMode(options.mode);
+  const allInputs = await buildOcrInputs(dataUrl);
+  const inputs = pickOcrInputsByMode(allInputs, mode);
+
+  const defaultTimeoutByMode = mode === "fast" ? 9000 : mode === "accurate" ? 26000 : 18000;
+  const totalTimeout = Math.max(7000, Number(options.timeoutMs || defaultTimeoutByMode));
+  const perAttemptTimeout = Math.max(2800, Math.floor(totalTimeout / Math.max(1, inputs.length)));
+  const earlyStopScore = mode === "fast" ? 220 : mode === "accurate" ? 340 : 280;
 
   const attempts = [];
   for (const input of inputs) {
@@ -828,7 +932,7 @@ async function runOcrPipeline(dataUrl, options = {}) {
       attempts.push(item);
 
       // 到达较高置信度后直接收敛，降低延迟。
-      if (score >= 280) break;
+      if (score >= earlyStopScore) break;
     } else {
       attempts.push({
         ok: false,
@@ -853,6 +957,7 @@ async function runOcrPipeline(dataUrl, options = {}) {
       score: Number(best.score || 0),
       variant: best.variant,
       engine: best.engine,
+      mode,
       provider: OCR_PROVIDER,
       attempts: summarizeOcrAttempts(attempts)
     };
@@ -862,6 +967,7 @@ async function runOcrPipeline(dataUrl, options = {}) {
   return {
     ok: false,
     error: firstError,
+    mode,
     provider: OCR_PROVIDER,
     attempts: summarizeOcrAttempts(attempts)
   };
@@ -879,17 +985,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (type === MSG.OCR_REQUEST) {
         const dataUrl = await captureVisible();
         const ocr = await runOcrPipeline(dataUrl, payload || {});
+        const ocrDiag = buildOcrDiagnosticPayload(ocr);
 
         if (ocr.ok) {
           sendStatus(
             sessionId,
-            `OCR 识别成功：variant=${ocr.variant || "original"}, score=${Number(ocr.score || 0)}, 文本长度=${String(
-              ocr.text || ""
-            ).length}`
+            `OCR 识别成功：mode=${ocr.mode || DEFAULT_OCR_MODE}, variant=${ocr.variant || "original"}, score=${Number(
+              ocr.score || 0
+            )}, 文本长度=${String(ocr.text || "").length}`
+            ,
+            { ocrDiag }
           );
         } else {
           appendSessionError(sessionId, `OCR_FAILED: ${ocr.error || "unknown"}`);
-          sendStatus(sessionId, `[OCR_FAILED] ${ocr.error || "unknown"}`);
+          sendStatus(sessionId, `[OCR_FAILED] ${ocr.error || "unknown"}`, { ocrDiag });
         }
 
         sendResponse(ocr);
@@ -951,6 +1060,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const extractSource = extractMeta.source || "dom";
         const extractReason = extractMeta.reason || "unknown";
         const finalLength = Number(extractMeta.finalLength || String(text).length || 0);
+        const ocrMode = extractMeta.ocrMode || meta.ocrMode || DEFAULT_OCR_MODE;
         const ocrProvider = extractMeta.ocrProvider || "-";
         const ocrError = extractMeta.ocrError || "-";
         const ocrVariant = extractMeta.ocrVariant || "-";
@@ -977,6 +1087,7 @@ CapturedAt: ${new Date().toISOString()}
 ExtractSource: ${extractSource}
 ExtractReason: ${extractReason}
 TextLength: ${finalLength}
+OCRMode: ${ocrMode}
 OCRProvider: ${ocrProvider}
 OCRError: ${ocrError}
 OCRVariant: ${ocrVariant}

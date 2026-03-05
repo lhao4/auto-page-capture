@@ -1,5 +1,23 @@
 # 变更记录（CHANGELOG）
 
+## v1.2.0-dev Task3（2026-03-05）
+- Popup 状态区升级：新增 OCR 诊断面板（模式、最佳分支、评分、尝试详情）
+- Background OCR 诊断上报：`STATUS.payload.ocrDiag` 结构化返回 OCR 结果
+- 可视化调参能力：可直接在 popup 查看各分支成功/失败与得分，快速定位识别问题
+
+## v1.2.0-dev Task2（2026-03-05）
+- OCR 新增模式化调参：`fast / balanced / accurate`
+- popup 新增 OCR 模式选择并持久化配置，启动参数全链路透传
+- background OCR 流程按模式分流：尝试分支数、总超时、提前收敛阈值动态调整
+- content/background 元数据补充：导出 `page.md` 新增 `OCRMode` 字段
+
+## v1.2.0-dev Task1（2026-03-05）
+- 启动 V2 首个迭代：聚焦“OCR 识别准确率 + PDF 清晰度”双提升
+- 文本抽取策略升级：由“仅长度阈值”升级为“长度+质量双阈值”触发 OCR
+- 新增 DOM/OCR 融合补全：OCR 不足以完全替换 DOM 时，执行去重合并降低漏字
+- OCR 预处理增强：新增暗色页面反相分支与灰度二值分支，保持多路评分择优
+- PDF 清晰度参数上调：导出宽度提升、JPEG 回退质量提升、无损阈值提升
+
 ## v1.1.0-dev Task1（2026-03-04）
 - 文本抽取升级：由 `document.body.innerText` 改为“主内容候选评分”策略（DOM 优先）
 - 增加兜底流程：当 DOM 文本过短时，启用图像可访问文本兜底（`alt/aria-label/figcaption/svg text`）

@@ -13,7 +13,10 @@ const STABLE_REQUIRED_ROUNDS = 3;
 const STABLE_MAX_WAIT_MS = 2000;
 const NAV_POLL_MS = 100;
 const NAV_TIMEOUT_MS = 8000;
+const DEFAULT_OCR_MODE = "balanced";
 const MIN_DOM_TEXT_LEN = 200;
+const MIN_DOM_QUALITY_SCORE = 160;
+const MIN_OCR_ACCEPT_SCORE = 88;
 const OCR_TIMEOUT_MS = 18000;
 const SCROLL_OVERLAP_MIN = 96;
 const SCROLL_OVERLAP_MAX = 240;
@@ -155,9 +158,57 @@ function shouldPreferCandidate(baseEval, candidateEval, opts = {}) {
   return false;
 }
 
+function normalizeDedupToken(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .trim();
+}
+
+function mergeDomAndOcrText(domText, ocrText) {
+  const domLines = normalizePlainText(domText).split("\n").map((v) => v.trim()).filter(Boolean);
+  const ocrLines = normalizePlainText(ocrText).split("\n").map((v) => v.trim()).filter(Boolean);
+  if (!domLines.length) return normalizePlainText(ocrText);
+  if (!ocrLines.length) return normalizePlainText(domText);
+
+  const merged = [...domLines];
+  const tokens = new Set(
+    domLines
+      .map((line) => normalizeDedupToken(line))
+      .filter((token) => token.length >= 6)
+  );
+
+  let appended = 0;
+  for (const line of ocrLines) {
+    if (line.length < 8) continue;
+    const token = normalizeDedupToken(line);
+    if (token.length < 6) continue;
+    if (tokens.has(token)) continue;
+    merged.push(line);
+    tokens.add(token);
+    appended += 1;
+    if (appended >= 120) break;
+  }
+
+  return normalizePlainText(merged.join("\n"));
+}
+
 function normalizeOcrLanguage(value) {
   const v = String(value || "").trim().toLowerCase();
   return v || "chs";
+}
+
+function normalizeOcrMode(value) {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "fast" || v === "accurate") return v;
+  return DEFAULT_OCR_MODE;
+}
+
+function getOcrTimeoutByMode(mode) {
+  const m = normalizeOcrMode(mode);
+  if (m === "fast") return 9000;
+  if (m === "accurate") return 26000;
+  return OCR_TIMEOUT_MS;
 }
 
 function toNumber(value, fallback, min = 0) {
@@ -280,10 +331,13 @@ function extractAccessibleImageText() {
 }
 
 async function requestOcrText(sessionId, options = {}) {
+  const ocrMode = normalizeOcrMode(options.ocrMode);
+  const timeoutMs = Number(options.ocrTimeoutMs || getOcrTimeoutByMode(ocrMode));
   const payload = {
     apiKey: String(options.ocrApiKey || "").trim(),
+    mode: ocrMode,
     language: normalizeOcrLanguage(options.ocrLanguage),
-    timeoutMs: Number(options.ocrTimeoutMs || OCR_TIMEOUT_MS)
+    timeoutMs
   };
 
   try {
@@ -291,7 +345,7 @@ async function requestOcrText(sessionId, options = {}) {
       MSG.OCR_REQUEST,
       sessionId,
       payload,
-      Number(payload.timeoutMs || OCR_TIMEOUT_MS) + 3000
+      Number(timeoutMs || OCR_TIMEOUT_MS) + 3000
     );
     if (resp?.ok && textLength(resp.text) > 0) {
       return {
@@ -318,12 +372,16 @@ async function requestOcrText(sessionId, options = {}) {
 
 async function getPageText(options = {}) {
   const minDomTextLength = Math.max(0, Number(options.minDomTextLength || MIN_DOM_TEXT_LEN));
+  const minDomQualityScore = Math.max(0, Number(options.minDomQualityScore || MIN_DOM_QUALITY_SCORE));
   const allowFallback = options.allowFallback !== false;
   const ocrEnabled = !!options.ocrEnabled;
 
   const dom = extractDomPrimaryText();
   const domLen = textLength(dom.text);
   const domEval = evaluateTextQuality(dom.text);
+  const needOcrByLength = domLen < minDomTextLength;
+  const needOcrByQuality = domEval.score < minDomQualityScore;
+  const shouldTryOcr = allowFallback && (needOcrByLength || needOcrByQuality);
 
   let finalText = dom.text;
   let finalEval = domEval;
@@ -334,7 +392,7 @@ async function getPageText(options = {}) {
   let ocrVariant = "";
   let ocrScore = 0;
 
-  if (allowFallback && domLen < minDomTextLength) {
+  if (shouldTryOcr) {
     if (ocrEnabled) {
       const ocr = await requestOcrText(currentSessionId, options);
       if (ocr.ok) {
@@ -342,20 +400,35 @@ async function getPageText(options = {}) {
         ocrProvider = ocr.provider || "ocrspace";
         ocrVariant = ocr.variant || "original";
         ocrScore = Number(ocr.score || ocrEval.score || 0);
-        if (shouldPreferCandidate(domEval, ocrEval, { minLength: 30 })) {
+        if (ocrEval.score >= MIN_OCR_ACCEPT_SCORE && shouldPreferCandidate(domEval, ocrEval, { minLength: 30 })) {
           finalText = ocr.text;
           finalEval = ocrEval;
           source = "ocr_engine";
-          reason = "dom_too_short_use_remote_ocr";
+          reason = needOcrByLength ? "dom_too_short_use_remote_ocr" : "dom_quality_low_use_remote_ocr";
+        } else if (ocrEval.score >= MIN_OCR_ACCEPT_SCORE) {
+          const mergedText = mergeDomAndOcrText(dom.text, ocr.text);
+          const mergedEval = evaluateTextQuality(mergedText);
+          if (
+            shouldPreferCandidate(domEval, mergedEval, { minLength: 40 }) &&
+            mergedEval.score >= domEval.score + 6 &&
+            mergedEval.length >= domEval.length + 20
+          ) {
+            finalText = mergedText;
+            finalEval = mergedEval;
+            source = "hybrid_dom_ocr";
+            reason = "dom_ocr_merge";
+          } else {
+            ocrError = `OCR_NOT_BETTER(dom=${domEval.score},ocr=${ocrEval.score},merged=${mergedEval.score})`;
+          }
         } else {
-          ocrError = `OCR_QUALITY_LOW(dom=${domEval.score},ocr=${ocrEval.score})`;
+          ocrError = `OCR_QUALITY_LOW(dom=${domEval.score},ocr=${ocrEval.score},min=${MIN_OCR_ACCEPT_SCORE})`;
         }
       } else {
         ocrError = String(ocr.error || "OCR_FAILED");
       }
     }
 
-    if (source === "dom") {
+    if (source === "dom" && needOcrByLength) {
       const fallbackText = extractAccessibleImageText();
       const fallbackEval = evaluateTextQuality(fallbackText);
       if (shouldPreferCandidate(domEval, fallbackEval, { minLength: 20 })) {
@@ -370,6 +443,8 @@ async function getPageText(options = {}) {
       } else {
         reason = "dom_too_short_keep_dom";
       }
+    } else if (source === "dom" && needOcrByQuality) {
+      reason = ocrEnabled && ocrError ? "dom_quality_low_ocr_not_better_keep_dom" : "dom_quality_low_keep_dom";
     }
   }
 
@@ -381,6 +456,7 @@ async function getPageText(options = {}) {
       source,
       reason,
       ocrEnabled,
+      ocrMode: normalizeOcrMode(options.ocrMode),
       ocrProvider,
       ocrError,
       ocrVariant,
@@ -391,7 +467,8 @@ async function getPageText(options = {}) {
       domQuality: domEval.score,
       finalLength: textLength(finalText),
       finalQuality: finalEval.score,
-      minDomTextLength
+      minDomTextLength,
+      minDomQualityScore
     }
   };
 }
@@ -584,6 +661,7 @@ async function run(config) {
     exportPdf: config.exportPdf !== false,
     pdfSinglePage: config.pdfSinglePage !== false,
     ocrEnabled: !!config.ocrEnabled,
+    ocrMode: normalizeOcrMode(config.ocrMode),
     ocrLanguage: normalizeOcrLanguage(config.ocrLanguage)
   });
 
@@ -597,18 +675,24 @@ async function run(config) {
   if (config.exportText && shouldContinue(runId)) {
     const pageText = await getPageText({
       minDomTextLength: MIN_DOM_TEXT_LEN,
+      minDomQualityScore: MIN_DOM_QUALITY_SCORE,
       allowFallback: true,
       ocrEnabled: !!config.ocrEnabled,
+      ocrMode: normalizeOcrMode(config.ocrMode),
       ocrLanguage: normalizeOcrLanguage(config.ocrLanguage),
       ocrApiKey: String(config.ocrApiKey || "").trim(),
-      ocrTimeoutMs: OCR_TIMEOUT_MS
+      ocrTimeoutMs: getOcrTimeoutByMode(config.ocrMode)
     });
     if (pageText.extractMeta?.source === "ocr_engine") {
-      pushStatus("DOM 文本较少，已使用 OCR 引擎兜底。");
+      pushStatus(`DOM 文本较少，已使用 OCR 引擎兜底（模式=${pageText.extractMeta?.ocrMode || DEFAULT_OCR_MODE}）。`);
+    } else if (pageText.extractMeta?.source === "hybrid_dom_ocr") {
+      pushStatus(`DOM 与 OCR 已融合，补齐漏识别内容（模式=${pageText.extractMeta?.ocrMode || DEFAULT_OCR_MODE}）。`);
     } else if (pageText.extractMeta?.source === "ocr_fallback_accessible") {
       pushStatus("DOM 文本较少，已启用 OCR 兜底（图像可访问文本策略）。");
     } else if (pageText.extractMeta?.reason === "dom_too_short_ocr_not_better_keep_dom") {
       pushStatus("DOM 文本较少，但 OCR 质量不足，已保留 DOM 文本。");
+    } else if (pageText.extractMeta?.reason === "dom_quality_low_ocr_not_better_keep_dom") {
+      pushStatus("DOM 文本质量偏低，但 OCR 未带来明显提升，已保留 DOM 文本。");
     } else {
       pushStatus("文本导出使用 DOM 主内容提取。");
     }
@@ -688,6 +772,7 @@ chrome.runtime.onMessage.addListener((msg) => {
       exportPdf: payload.exportPdf !== false,
       pdfSinglePage: payload.pdfSinglePage !== false,
       ocrEnabled: !!payload.ocrEnabled,
+      ocrMode: normalizeOcrMode(payload.ocrMode),
       ocrLanguage: normalizeOcrLanguage(payload.ocrLanguage),
       ocrApiKey: String(payload.ocrApiKey || "").trim()
     };
