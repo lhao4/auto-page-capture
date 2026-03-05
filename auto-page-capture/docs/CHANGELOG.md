@@ -1,5 +1,11 @@
 # 变更记录（CHANGELOG）
 
+## v1.3.0（2026-03-05）
+- 发布版本号从 `1.0.0` 提升到 `1.3.0`（manifest 同步）
+- 收尾文档同步：`ARCHITECTURE/DEV_GUIDE/PRD/TEST_PLAN` 与当前实现保持一致
+- 明确当前产物为 `shots/*.png`、`page.md`、`long_capture.pdf`，不再描述 `session.json` 导出
+- 测试计划补充“中途 Stop 仍应导出已截取内容 PDF”验收项
+
 ## v1.2.0-dev Task3（2026-03-05）
 - Popup 状态区升级：新增 OCR 诊断面板（模式、最佳分支、评分、尝试详情）
 - Background OCR 诊断上报：`STATUS.payload.ocrDiag` 结构化返回 OCR 结果

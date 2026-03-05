@@ -23,7 +23,7 @@
 
 ### 3.2 可选（Should）
 1) 自动翻页：识别 “下一页/Next/rel=next” 并点击继续任务
-2) 会话元数据：session.json 记录参数、输出文件、错误
+2) 导出长截图 PDF（优先单页，过长自动回退多页）
 
 ### 3.3 暂不做（Won’t in V1）
 - 长图拼接（整页合成 1 张）
@@ -37,7 +37,7 @@
 4) 点击 Start
 5) 扩展开始截图并保存，同时在 popup 显示状态
 6) 用户可随时点击 Stop
-7) 完成后生成截图、page.md、session.json
+7) 完成后生成截图、page.md、long_capture.pdf（按开关配置）
 
 ## 5. 交付物
 - 扩展源码（Manifest V3）

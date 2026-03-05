@@ -4,7 +4,7 @@
 - Scroll Only：长页面自动滚动截图与停止
 - Next Page：分页站点翻页截图
 - 导出文本：page.md
-- 元数据：session.json
+- 导出 PDF：long_capture.pdf（单页优先，超限自动多页）
 
 ## 2. 测试用例
 ### TC-01 Scroll Only 基础
@@ -14,7 +14,8 @@
 3) Start
 期望：
 - 保存多张 shot_*.png
-- 生成 page.md、session.json
+- 生成 page.md
+- 生成 long_capture.pdf（启用导出 PDF 时）
 
 ### TC-02 Stop 立即生效
 步骤：
@@ -23,6 +24,7 @@
 期望：
 - 1 秒内停止继续保存新截图
 - popup 显示 Stopping/Finished
+- 已保存截图数量 > 0 时，仍生成 long_capture.pdf（内容为已截取部分）
 
 ### TC-03 Next Page 翻页
 步骤：
@@ -31,7 +33,7 @@
 3) Start
 期望：
 - 至少翻 2 页继续保存截图
-- session.json 记录 shots 列表
+- 最终生成 long_capture.pdf
 
 ### TC-04 异常容错
 步骤：

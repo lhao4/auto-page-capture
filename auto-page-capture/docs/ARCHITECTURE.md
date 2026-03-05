@@ -16,14 +16,14 @@
 
 ### 2.2 Content Script（页面控制）
 - 自动滚动策略：滚动→等待→请求截图
-- 自动翻页策略：到底后识别 Next 元素→点击→等待 URL 变化
-- 导出 DOM 文本：document.body.innerText
+- 自动翻页策略：到底后识别 Next 元素→点击→等待 URL 或 DOM 变化
+- 文本导出：DOM 主内容提取 + OCR 兜底（可选）
 - 响应 Stop：尽快终止循环
 
 ### 2.3 Background Service Worker（能力层）
 - 创建会话：生成输出目录（Downloads/page_capture/<host>/<sessionId>/）
 - 截图并下载保存
-- 保存 page.md、session.json
+- 保存 page.md、long_capture.pdf
 - 统一状态/错误消息回传
 
 ## 3. 消息协议
@@ -49,24 +49,10 @@
 Downloads/page_capture/<host>/<sessionId>/
 - shots/shot_000.png ...
 - page.md
-- session.json
-
-`session.json` Schema（V1）：
-- `startedAt`: number（epoch ms）
-- `endedAt`: number|null（epoch ms）
-- `mode`: string
-- `delayMs`: number
-- `maxShots`: number
-- `maxPages`: number
-- `exportText`: boolean
-- `shots`: array
-  - item: `{ index, filename, ts }`
-- `errors`: array
-  - item: `{ ts, message }`
+- long_capture.pdf（开启 PDF 导出时）
 
 说明：
-- `SESSION_FINISH` 时始终写出 `session.json`（即使 `shots` 为空）
-- 运行中出现 `ERROR` 且 session 存在时，错误会追加到 `errors`
+- 会话元数据仅在运行期保存在内存中，不再导出 `session.json` 文件。
 
 ## 5. 自动滚动策略（V1）
 - 以 window 为滚动容器

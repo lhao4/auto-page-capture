@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "自动页面截图",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "自动滚动与翻页截图，并导出页面文本。",
   "permissions": ["activeTab", "scripting", "downloads", "storage"],
   "host_permissions": ["<all_urls>"],

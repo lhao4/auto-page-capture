@@ -8,7 +8,7 @@
 1) 打开 chrome://extensions/
 2) 打开右上角“开发者模式”
 3) 点击“加载已解压的扩展程序”
-4) 选择本项目根目录（包含 manifest.json 的目录）
+4) 选择 `e:\auto-page-capture\auto-page-capture`（包含 `manifest.json` 的目录）
 
 ## 3. 使用方法
 1) 打开任意网页
@@ -26,7 +26,7 @@
 Downloads/page_capture/<host>/<sessionId>/
 - shots/shot_000.png ...
 - page.md
-- session.json
+- long_capture.pdf（启用导出 PDF 时）
 
 ## 5. 常见问题
 - 截图为空：确认页面不是 chrome:// 之类的受限页面
