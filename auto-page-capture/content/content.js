@@ -13,6 +13,14 @@ const STABLE_REQUIRED_ROUNDS = 3;
 const STABLE_MAX_WAIT_MS = 2000;
 const NAV_POLL_MS = 100;
 const NAV_TIMEOUT_MS = 8000;
+const DEFAULT_OCR_MODE = "balanced";
+const MIN_DOM_TEXT_LEN = 200;
+const MIN_DOM_QUALITY_SCORE = 160;
+const MIN_OCR_ACCEPT_SCORE = 88;
+const OCR_TIMEOUT_MS = 18000;
+const SCROLL_OVERLAP_MIN = 96;
+const SCROLL_OVERLAP_MAX = 240;
+const SCROLL_OVERLAP_RATIO = 0.18;
 
 let state = STATE.IDLE;
 let currentSessionId = UNKNOWN_SESSION_ID;
@@ -36,6 +44,29 @@ function makeMessage(type, sessionId, payload = {}) {
 
 function sendMessage(type, sessionId, payload = {}) {
   chrome.runtime.sendMessage(makeMessage(type, sessionId, payload));
+}
+
+function requestMessage(type, sessionId, payload = {}, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(new Error(`请求超时: ${type}`));
+    }, timeoutMs);
+
+    chrome.runtime.sendMessage(makeMessage(type, sessionId, payload), (resp) => {
+      if (done) return;
+      clearTimeout(timer);
+      done = true;
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(String(err.message || err)));
+        return;
+      }
+      resolve(resp || {});
+    });
+  });
 }
 
 function pushStatus(text) {
@@ -63,11 +94,382 @@ async function interruptibleSleep(ms, runId) {
   return shouldContinue(runId);
 }
 
-function getPageText() {
+function normalizePlainText(text) {
+  return String(text || "")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function textLength(text) {
+  return normalizePlainText(text).length;
+}
+
+function evaluateTextQuality(text) {
+  const normalized = normalizePlainText(text);
+  const len = normalized.length;
+  if (!len) {
+    return {
+      length: 0,
+      score: 0,
+      validRatio: 0
+    };
+  }
+
+  const cjk = (normalized.match(/[\u4e00-\u9fff]/g) || []).length;
+  const alphaNum = (normalized.match(/[A-Za-z0-9]/g) || []).length;
+  const punctuation = (normalized.match(/[，。！？；：、“”‘’（）()【】《》〈〉,.!?;:'"、\-_/]/g) || []).length;
+  const lines = normalized.split(/\n+/).filter(Boolean).length || 1;
+  const repeatedRuns = (normalized.match(/(.)\1{5,}/g) || []).length;
+  const longDigitRuns = (normalized.match(/\d{8,}/g) || []).length;
+  const invalidChars = normalized.replace(/[\u4e00-\u9fffA-Za-z0-9\s，。！？；：、“”‘’（）()【】《》〈〉,.!?;:'"、\-_/]/g, "");
+  const invalid = invalidChars.length;
+  const validRatio = Math.min(1, (cjk + alphaNum + punctuation) / Math.max(1, len));
+
+  let score = 0;
+  score += len * 0.34;
+  score += validRatio * 120;
+  score += Math.min(lines, 20) * 2;
+  score -= invalid * 1.25;
+  score -= repeatedRuns * 14;
+  score -= longDigitRuns * 6;
+
+  return {
+    length: len,
+    score: Math.max(0, Math.round(score)),
+    validRatio
+  };
+}
+
+function shouldPreferCandidate(baseEval, candidateEval, opts = {}) {
+  const minLength = Math.max(1, Number(opts.minLength || 24));
+  if (!candidateEval || candidateEval.length < minLength) return false;
+  if (!baseEval) return true;
+
+  if (baseEval.length < 40) {
+    return candidateEval.score >= Math.max(18, baseEval.score - 4);
+  }
+
+  const scoreLead = candidateEval.score - baseEval.score;
+  if (scoreLead >= 10) return true;
+  if (scoreLead >= -4 && candidateEval.length > baseEval.length * 1.45) return true;
+  return false;
+}
+
+function normalizeDedupToken(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .trim();
+}
+
+function mergeDomAndOcrText(domText, ocrText) {
+  const domLines = normalizePlainText(domText).split("\n").map((v) => v.trim()).filter(Boolean);
+  const ocrLines = normalizePlainText(ocrText).split("\n").map((v) => v.trim()).filter(Boolean);
+  if (!domLines.length) return normalizePlainText(ocrText);
+  if (!ocrLines.length) return normalizePlainText(domText);
+
+  const merged = [...domLines];
+  const tokens = new Set(
+    domLines
+      .map((line) => normalizeDedupToken(line))
+      .filter((token) => token.length >= 6)
+  );
+
+  let appended = 0;
+  for (const line of ocrLines) {
+    if (line.length < 8) continue;
+    const token = normalizeDedupToken(line);
+    if (token.length < 6) continue;
+    if (tokens.has(token)) continue;
+    merged.push(line);
+    tokens.add(token);
+    appended += 1;
+    if (appended >= 120) break;
+  }
+
+  return normalizePlainText(merged.join("\n"));
+}
+
+function normalizeOcrLanguage(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return v || "chs";
+}
+
+function normalizeOcrMode(value) {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "fast" || v === "accurate") return v;
+  return DEFAULT_OCR_MODE;
+}
+
+function getOcrTimeoutByMode(mode) {
+  const m = normalizeOcrMode(mode);
+  if (m === "fast") return 9000;
+  if (m === "accurate") return 26000;
+  return OCR_TIMEOUT_MS;
+}
+
+function toNumber(value, fallback, min = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, n);
+}
+
+function calcScrollStep(viewport) {
+  const vp = Math.max(1, Number(viewport || 0));
+  const overlap = Math.min(
+    SCROLL_OVERLAP_MAX,
+    Math.max(SCROLL_OVERLAP_MIN, Math.round(vp * SCROLL_OVERLAP_RATIO))
+  );
+  return Math.max(80, vp - overlap);
+}
+
+function getElementText(el) {
+  if (!el) return "";
+  return normalizePlainText(el.innerText || el.textContent || "");
+}
+
+function calcLinkDensity(el) {
+  if (!el) return 1;
+  const allText = getElementText(el);
+  if (!allText) return 1;
+  const linkText = normalizePlainText(
+    Array.from(el.querySelectorAll("a"))
+      .map((a) => a.innerText || a.textContent || "")
+      .join(" ")
+  );
+  return Math.min(1, textLength(linkText) / Math.max(1, textLength(allText)));
+}
+
+function scoreContentCandidate(el) {
+  if (!el) return -Infinity;
+  const text = getElementText(el);
+  const len = textLength(text);
+  if (len < 60) return -Infinity;
+
+  const pCount = el.querySelectorAll("p").length;
+  const headingCount = el.querySelectorAll("h1,h2,h3").length;
+  const linkDensity = calcLinkDensity(el);
+  const mediaCount = el.querySelectorAll("img,figure,video").length;
+
+  let score = len;
+  score += pCount * 120;
+  score += headingCount * 80;
+  score += mediaCount * 10;
+  score -= linkDensity * 800;
+
+  const idCls = `${el.id || ""} ${(el.className || "").toString()}`.toLowerCase();
+  if (/(content|article|post|entry|main|markdown|reader)/.test(idCls)) score += 300;
+  if (/(nav|menu|sidebar|footer|header|comment|advert|ads)/.test(idCls)) score -= 400;
+
+  const tag = String(el.tagName || "").toLowerCase();
+  if (tag === "main" || tag === "article") score += 250;
+  if (tag === "nav" || tag === "aside" || tag === "footer") score -= 400;
+
+  return score;
+}
+
+function extractDomPrimaryText() {
+  const preferred = [
+    "main",
+    "article",
+    "[role='main']",
+    "#content",
+    ".content",
+    ".post-content",
+    ".article-content",
+    ".entry-content",
+    ".markdown-body"
+  ];
+
+  const candidates = [];
+  for (const sel of preferred) {
+    const el = document.querySelector(sel);
+    if (el) candidates.push(el);
+  }
+  candidates.push(...Array.from(document.querySelectorAll("section,article,main,div")));
+  candidates.push(document.body);
+
+  let best = null;
+  let bestScore = -Infinity;
+  for (const el of candidates) {
+    const score = scoreContentCandidate(el);
+    if (score > bestScore) {
+      bestScore = score;
+      best = el;
+    }
+  }
+
+  const text = getElementText(best);
+  return {
+    text,
+    source: best ? (best.tagName || "BODY").toLowerCase() : "body",
+    score: bestScore
+  };
+}
+
+function extractAccessibleImageText() {
+  const parts = [];
+  const push = (s) => {
+    const t = normalizePlainText(s);
+    if (t && t.length >= 2) parts.push(t);
+  };
+
+  Array.from(document.querySelectorAll("img")).forEach((img) => {
+    push(img.alt);
+    push(img.getAttribute("aria-label"));
+    push(img.title);
+  });
+  Array.from(document.querySelectorAll("figure figcaption")).forEach((n) => push(n.innerText || n.textContent));
+  Array.from(document.querySelectorAll("svg text")).forEach((n) => push(n.textContent));
+  Array.from(document.querySelectorAll("[aria-label]")).slice(0, 120).forEach((n) => push(n.getAttribute("aria-label")));
+
+  const uniq = Array.from(new Set(parts));
+  return normalizePlainText(uniq.join("\n"));
+}
+
+async function requestOcrText(sessionId, options = {}) {
+  const ocrMode = normalizeOcrMode(options.ocrMode);
+  const timeoutMs = Number(options.ocrTimeoutMs || getOcrTimeoutByMode(ocrMode));
+  const payload = {
+    apiKey: String(options.ocrApiKey || "").trim(),
+    mode: ocrMode,
+    language: normalizeOcrLanguage(options.ocrLanguage),
+    timeoutMs
+  };
+
+  try {
+    const resp = await requestMessage(
+      MSG.OCR_REQUEST,
+      sessionId,
+      payload,
+      Number(timeoutMs || OCR_TIMEOUT_MS) + 3000
+    );
+    if (resp?.ok && textLength(resp.text) > 0) {
+      return {
+        ok: true,
+        text: normalizePlainText(resp.text),
+        provider: resp.provider || "ocrspace",
+        variant: resp.variant || "original",
+        score: Number(resp.score || 0),
+        attempts: Array.isArray(resp.attempts) ? resp.attempts : []
+      };
+    }
+    return {
+      ok: false,
+      error: String(resp?.error || "OCR_EMPTY"),
+      attempts: Array.isArray(resp?.attempts) ? resp.attempts : []
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: String(e?.message || e || "OCR_REQUEST_FAILED")
+    };
+  }
+}
+
+async function getPageText(options = {}) {
+  const minDomTextLength = Math.max(0, Number(options.minDomTextLength || MIN_DOM_TEXT_LEN));
+  const minDomQualityScore = Math.max(0, Number(options.minDomQualityScore || MIN_DOM_QUALITY_SCORE));
+  const allowFallback = options.allowFallback !== false;
+  const ocrEnabled = !!options.ocrEnabled;
+
+  const dom = extractDomPrimaryText();
+  const domLen = textLength(dom.text);
+  const domEval = evaluateTextQuality(dom.text);
+  const needOcrByLength = domLen < minDomTextLength;
+  const needOcrByQuality = domEval.score < minDomQualityScore;
+  const shouldTryOcr = allowFallback && (needOcrByLength || needOcrByQuality);
+
+  let finalText = dom.text;
+  let finalEval = domEval;
+  let source = "dom";
+  let reason = "dom_primary";
+  let ocrProvider = "";
+  let ocrError = "";
+  let ocrVariant = "";
+  let ocrScore = 0;
+
+  if (shouldTryOcr) {
+    if (ocrEnabled) {
+      const ocr = await requestOcrText(currentSessionId, options);
+      if (ocr.ok) {
+        const ocrEval = evaluateTextQuality(ocr.text);
+        ocrProvider = ocr.provider || "ocrspace";
+        ocrVariant = ocr.variant || "original";
+        ocrScore = Number(ocr.score || ocrEval.score || 0);
+        if (ocrEval.score >= MIN_OCR_ACCEPT_SCORE && shouldPreferCandidate(domEval, ocrEval, { minLength: 30 })) {
+          finalText = ocr.text;
+          finalEval = ocrEval;
+          source = "ocr_engine";
+          reason = needOcrByLength ? "dom_too_short_use_remote_ocr" : "dom_quality_low_use_remote_ocr";
+        } else if (ocrEval.score >= MIN_OCR_ACCEPT_SCORE) {
+          const mergedText = mergeDomAndOcrText(dom.text, ocr.text);
+          const mergedEval = evaluateTextQuality(mergedText);
+          if (
+            shouldPreferCandidate(domEval, mergedEval, { minLength: 40 }) &&
+            mergedEval.score >= domEval.score + 6 &&
+            mergedEval.length >= domEval.length + 20
+          ) {
+            finalText = mergedText;
+            finalEval = mergedEval;
+            source = "hybrid_dom_ocr";
+            reason = "dom_ocr_merge";
+          } else {
+            ocrError = `OCR_NOT_BETTER(dom=${domEval.score},ocr=${ocrEval.score},merged=${mergedEval.score})`;
+          }
+        } else {
+          ocrError = `OCR_QUALITY_LOW(dom=${domEval.score},ocr=${ocrEval.score},min=${MIN_OCR_ACCEPT_SCORE})`;
+        }
+      } else {
+        ocrError = String(ocr.error || "OCR_FAILED");
+      }
+    }
+
+    if (source === "dom" && needOcrByLength) {
+      const fallbackText = extractAccessibleImageText();
+      const fallbackEval = evaluateTextQuality(fallbackText);
+      if (shouldPreferCandidate(domEval, fallbackEval, { minLength: 20 })) {
+        finalText = fallbackText;
+        finalEval = fallbackEval;
+        source = "ocr_fallback_accessible";
+        reason = ocrEnabled
+          ? "dom_too_short_ocr_failed_use_accessible_image_text"
+          : "dom_too_short_use_accessible_image_text";
+      } else if (ocrEnabled && ocrError) {
+        reason = "dom_too_short_ocr_not_better_keep_dom";
+      } else {
+        reason = "dom_too_short_keep_dom";
+      }
+    } else if (source === "dom" && needOcrByQuality) {
+      reason = ocrEnabled && ocrError ? "dom_quality_low_ocr_not_better_keep_dom" : "dom_quality_low_keep_dom";
+    }
+  }
+
   return {
     title: document.title || "",
     url: location.href,
-    text: document.body?.innerText || ""
+    text: finalText,
+    extractMeta: {
+      source,
+      reason,
+      ocrEnabled,
+      ocrMode: normalizeOcrMode(options.ocrMode),
+      ocrProvider,
+      ocrError,
+      ocrVariant,
+      ocrScore,
+      domSource: dom.source,
+      domScore: dom.score,
+      domLength: domLen,
+      domQuality: domEval.score,
+      finalLength: textLength(finalText),
+      finalQuality: finalEval.score,
+      minDomTextLength,
+      minDomQualityScore
+    }
   };
 }
 
@@ -173,6 +575,7 @@ async function runCaptureLoop(config, runId) {
   window.scrollTo(0, 0);
   if (!(await interruptibleSleep(delayMs, runId))) return 0;
   if (!(await waitForContentStable(runId))) return 0;
+  pushStatus("已启用重叠滚动策略，优化中间衔接与内容完整性。");
 
   let index = 0;
   let unchangedScrollCount = 0;
@@ -182,7 +585,12 @@ async function runCaptureLoop(config, runId) {
     const shotIndex = index;
 
     if (!shouldContinue(runId)) break;
-    sendMessage(MSG.CAPTURE_REQUEST, currentSessionId, { index: shotIndex });
+    sendMessage(MSG.CAPTURE_REQUEST, currentSessionId, {
+      index: shotIndex,
+      y: beforeCapture.y,
+      viewport: beforeCapture.viewport,
+      scrollHeight: beforeCapture.scrollHeight
+    });
     index += 1;
 
     pushStatus(
@@ -204,7 +612,8 @@ async function runCaptureLoop(config, runId) {
       break;
     }
 
-    const targetY = afterCapture.y + afterCapture.viewport;
+    const step = calcScrollStep(afterCapture.viewport);
+    const targetY = afterCapture.y + step;
     if (!shouldContinue(runId)) break;
     window.scrollTo(0, targetY);
     if (!(await interruptibleSleep(delayMs, runId))) break;
@@ -248,7 +657,12 @@ async function run(config) {
     delayMs: config.delayMs,
     maxShots: config.maxShots,
     maxPages: config.maxPages,
-    exportText: !!config.exportText
+    exportText: !!config.exportText,
+    exportPdf: config.exportPdf !== false,
+    pdfSinglePage: config.pdfSinglePage !== false,
+    ocrEnabled: !!config.ocrEnabled,
+    ocrMode: normalizeOcrMode(config.ocrMode),
+    ocrLanguage: normalizeOcrLanguage(config.ocrLanguage)
   });
 
   if (!(await interruptibleSleep(200, runId))) {
@@ -259,7 +673,30 @@ async function run(config) {
   }
 
   if (config.exportText && shouldContinue(runId)) {
-    sendMessage(MSG.EXPORT_TEXT, currentSessionId, getPageText());
+    const pageText = await getPageText({
+      minDomTextLength: MIN_DOM_TEXT_LEN,
+      minDomQualityScore: MIN_DOM_QUALITY_SCORE,
+      allowFallback: true,
+      ocrEnabled: !!config.ocrEnabled,
+      ocrMode: normalizeOcrMode(config.ocrMode),
+      ocrLanguage: normalizeOcrLanguage(config.ocrLanguage),
+      ocrApiKey: String(config.ocrApiKey || "").trim(),
+      ocrTimeoutMs: getOcrTimeoutByMode(config.ocrMode)
+    });
+    if (pageText.extractMeta?.source === "ocr_engine") {
+      pushStatus(`DOM 文本较少，已使用 OCR 引擎兜底（模式=${pageText.extractMeta?.ocrMode || DEFAULT_OCR_MODE}）。`);
+    } else if (pageText.extractMeta?.source === "hybrid_dom_ocr") {
+      pushStatus(`DOM 与 OCR 已融合，补齐漏识别内容（模式=${pageText.extractMeta?.ocrMode || DEFAULT_OCR_MODE}）。`);
+    } else if (pageText.extractMeta?.source === "ocr_fallback_accessible") {
+      pushStatus("DOM 文本较少，已启用 OCR 兜底（图像可访问文本策略）。");
+    } else if (pageText.extractMeta?.reason === "dom_too_short_ocr_not_better_keep_dom") {
+      pushStatus("DOM 文本较少，但 OCR 质量不足，已保留 DOM 文本。");
+    } else if (pageText.extractMeta?.reason === "dom_quality_low_ocr_not_better_keep_dom") {
+      pushStatus("DOM 文本质量偏低，但 OCR 未带来明显提升，已保留 DOM 文本。");
+    } else {
+      pushStatus("文本导出使用 DOM 主内容提取。");
+    }
+    sendMessage(MSG.EXPORT_TEXT, currentSessionId, pageText);
   }
 
   const totalPages = Math.max(1, Number(config.maxPages || 1));
@@ -324,9 +761,20 @@ chrome.runtime.onMessage.addListener((msg) => {
 
   if (msg.type === MSG.START_CAPTURE) {
     const sessionId = normalizeSessionId(msg.sessionId || window.APC.nowSessionId());
+    const payload = msg.payload || {};
     const config = {
-      ...(msg.payload || {}),
-      sessionId
+      sessionId,
+      mode: payload.mode === "nextPage" ? "nextPage" : "scrollOnly",
+      delayMs: toNumber(payload.delayMs, 800, 100),
+      maxShots: toNumber(payload.maxShots, 120, 1),
+      maxPages: toNumber(payload.maxPages, 1, 1),
+      exportText: payload.exportText !== false,
+      exportPdf: payload.exportPdf !== false,
+      pdfSinglePage: payload.pdfSinglePage !== false,
+      ocrEnabled: !!payload.ocrEnabled,
+      ocrMode: normalizeOcrMode(payload.ocrMode),
+      ocrLanguage: normalizeOcrLanguage(payload.ocrLanguage),
+      ocrApiKey: String(payload.ocrApiKey || "").trim()
     };
     run(config).catch((e) => {
       setState(STATE.FINISHED);

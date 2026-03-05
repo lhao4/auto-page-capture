@@ -5,44 +5,136 @@
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <h3>自动页面截图</h3>
+  <header class="hero panel">
+    <h1>自动页面抓取</h1>
+    <p>滚动截图、自动翻页与文本导出</p>
+  </header>
 
-  <div class="box">
-    <label>
-      模式：
-      <select id="mode">
-        <option value="scrollOnly">仅滚动</option>
-        <option value="nextPage">滚动 + 自动翻页</option>
-      </select>
-    </label>
+  <section class="panel">
+    <h2>基础参数</h2>
+    <div class="field-grid">
+      <label class="field">
+        <span class="field-label">模式</span>
+        <select id="mode">
+          <option value="scrollOnly">仅滚动</option>
+          <option value="nextPage">滚动 + 自动翻页</option>
+        </select>
+      </label>
 
-    <label>
-      延迟(ms)：
-      <input id="delay" type="number" value="800" min="100" step="100" />
-    </label>
+      <label class="field">
+        <span class="field-label">延迟 (ms)</span>
+        <input id="delay" type="number" value="800" min="100" step="100" />
+      </label>
 
-    <label>
-      最大截图数：
-      <input id="maxShots" type="number" value="120" min="1" step="10" />
-    </label>
+      <label class="field">
+        <span class="field-label">最大截图数</span>
+        <input id="maxShots" type="number" value="120" min="1" step="10" />
+      </label>
 
-    <label>
-      最大页数：
-      <input id="maxPages" type="number" value="5" min="1" step="1" />
-    </label>
+      <label class="field">
+        <span class="field-label">最大页数</span>
+        <input id="maxPages" type="number" value="5" min="1" step="1" />
+      </label>
+    </div>
 
     <label class="chk">
       <input id="exportText" type="checkbox" checked />
-      导出页面文本（page.md）
+      <span>导出页面文本（page.md）</span>
     </label>
 
-    <div class="row">
-      <button id="start">开始</button>
-      <button id="stop">停止</button>
-    </div>
-  </div>
+    <label class="chk">
+      <input id="exportPdf" type="checkbox" checked />
+      <span>导出长截图 PDF（long_capture.pdf）</span>
+    </label>
 
-  <div id="status" class="status">空闲</div>
+    <label class="chk">
+      <input id="pdfSinglePage" type="checkbox" checked />
+      <span>优先单页长 PDF（过长自动分多页）</span>
+    </label>
+  </section>
+
+  <section class="panel">
+    <h2>OCR 兜底</h2>
+    <label class="chk">
+      <input id="ocrEnabled" type="checkbox" />
+      <span>启用 OCR 引擎兜底（实验）</span>
+    </label>
+
+    <div class="field-grid ocr-grid">
+      <label class="field">
+        <span class="field-label">OCR 模式</span>
+        <select id="ocrMode">
+          <option value="balanced">均衡（推荐）</option>
+          <option value="fast">快速（更省时）</option>
+          <option value="accurate">高精度（更耗时）</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field-label">OCR 语言</span>
+        <select id="ocrLanguage">
+          <option value="chs">简体中文（chs）</option>
+          <option value="cht">繁体中文（cht）</option>
+          <option value="eng">英语（eng）</option>
+          <option value="jpn">日语（jpn）</option>
+          <option value="kor">韩语（kor）</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field-label">OCR API Key</span>
+        <input id="ocrApiKey" type="password" placeholder="可选；留空时使用演示 key（限频）" />
+      </label>
+    </div>
+
+    <div class="hint">模式建议：快速=更省时，均衡=日常默认，高精度=更慢但更稳。建议配置你自己的 OCR.Space API Key，以提高稳定性与识别精度。</div>
+  </section>
+
+  <section class="panel actions">
+    <button id="start" class="btn btn-primary">开始抓取</button>
+    <button id="stop" class="btn btn-secondary">停止</button>
+  </section>
+
+  <section id="statusPanel" class="panel status-panel">
+    <h2>运行状态</h2>
+    <div class="status-row">
+      <span class="status-key">会话ID</span>
+      <span id="statusSessionId" class="status-value">无</span>
+    </div>
+    <div class="status-row">
+      <span class="status-key">状态</span>
+      <span id="statusText" class="status-value">空闲</span>
+    </div>
+    <div class="error-box">
+      <div class="status-key">错误</div>
+      <pre id="statusError">-</pre>
+    </div>
+
+    <div id="ocrDiagPanel" class="diag-box">
+      <div class="diag-title">OCR 诊断</div>
+      <div class="status-row">
+        <span class="status-key">模式</span>
+        <span id="ocrDiagMode" class="status-value">-</span>
+      </div>
+      <div class="status-row">
+        <span class="status-key">结果</span>
+        <span id="ocrDiagSummary" class="status-value">-</span>
+      </div>
+      <div class="status-row">
+        <span class="status-key">最佳分支</span>
+        <span id="ocrDiagVariant" class="status-value">-</span>
+      </div>
+      <div class="status-row">
+        <span class="status-key">评分</span>
+        <span id="ocrDiagScore" class="status-value">-</span>
+      </div>
+      <div class="status-row">
+        <span class="status-key">尝试详情</span>
+        <span id="ocrDiagAttemptsMeta" class="status-value">-</span>
+      </div>
+      <pre id="ocrDiagAttempts" class="diag-attempts">-</pre>
+    </div>
+  </section>
 
   <script src="../utils/common.js"></script>
   <script src="popup.js"></script>
